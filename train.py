@@ -70,8 +70,43 @@ class seg_head(nn.Module):
             x = F.interpolate(x, scale_factor=self.scale_factor,
                               mode='trilinear', align_corners=False)
         return x 
-    
 
+class Loss(nn.Module):
+    """Deep supervision loss with learnable head weights.
+
+    Each decoder head contributes one loss term. The 4 per-head losses
+    are stacked into a [4]-vector and combined by a learnable Linear(4,1).
+    """
+    def __init__(self, beta=0.5):
+        super().__init__()
+        self.dice_loss = monai.losses.DiceLoss(sigmoid=True)
+        self.cross_entropy_loss = nn.BCEWithLogitsLoss()
+        self.beta = beta
+        # learnable combination weights for 4 decoder heads
+        self.combine = nn.Linear(4, 1, bias=False)
+
+    def forward(self, x1, x2, x3, x4, y):
+        # order: coarse -> fine (x4=deepest, x1=final)
+        losses = []
+        for x in [x4, x3, x2, x1]:
+            dice = self.dice_loss(x, y)
+            bce = self.cross_entropy_loss(x, y)
+            losses.append(dice + self.beta * bce)
+
+        loss_vec = torch.stack(losses)               # [4]
+        return self.combine(loss_vec.unsqueeze(0)).squeeze()  # scalar    
+
+def compute_dice_score(pred, target, eps=1e-6):
+    """Compute batch Dice coefficient for binary segmentation.
+
+    pred: [B, 1, D, H, W] logits
+    target: [B, 1, D, H, W] binary mask (0/1)
+    """
+    pred = torch.sigmoid(pred)
+    pred = (pred > 0.5).float()
+    intersection = (pred * target).sum(dim=(1, 2, 3, 4))
+    union = pred.sum(dim=(1, 2, 3, 4)) + target.sum(dim=(1, 2, 3, 4))
+    return (2 * intersection / (union + eps)).mean()
 class Unet(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -110,6 +145,8 @@ class Unet(nn.Module):
         self.attn2 = cross_attention(in_channels=256, out_channels=256, num_heads=8)
         self.attn3 = cross_attention(in_channels=128, out_channels=128, num_heads=8)
         self.attn4 = cross_attention(in_channels=out_channels, out_channels=out_channels, num_heads=8)
+        
+        
 
     def forward(self, x): # x: [B, C, D, H, W]
         # encoder
@@ -145,4 +182,8 @@ class Unet(nn.Module):
 
 
 
-        return x4_out, x3_out, x2_out, x1_out
+        
+
+
+
+
